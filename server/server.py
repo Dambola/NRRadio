@@ -1,97 +1,153 @@
-from shared import cmd
-from shared.utils import convert_int_stringbyte
+from shared.cmd import *
+from shared.utils import convert_int_stringbyte, show_command, show_notify, show_fail
 from threading import Thread
 import socket as skt
 
-# def on_new_client(clientsocket,addr):
-#     while True:
-#         msg = clientsocket.recv(1024)
-#         #do some checks and if msg == someWeirdSignal: break:
-#         print addr, ' >> ', msg
-#         msg = raw_input('SERVER >> ')
-#         #Maybe some code to compute the last digit of PI, play game or anything else can go here and when you are done.
-#         clientsocket.send(msg)
-#     clientsocket.close()
 
-# s = socket.socket()         # Create a socket object
-# host = socket.gethostname() # Get local machine name
-# port = 50000                # Reserve a port for your service.
 
-# print 'Server started!'
-# print 'Waiting for clients...'
-
-# s.bind((host, port))        # Bind to the port
-# s.listen(5)                 # Now wait for client connection.
-
-# print 'Got connection from', addr
-# while True:
-#    c, addr = s.accept()     # Establish connection with client.
-#    thread.start_new_thread(on_new_client,(c,addr))
-#    #Note it's (addr,) not (addr) because second parameter is a tuple
-#    #Edit: (c,addr)
-#    #that's how you pass arguments to functions when creating new threads using thread module.
-# s.close()
+# ---- Server Class
 
 class Server:
-    def __init__(self, host, port, max_connections):
-        self.stations_number = stations_number
-        self.header_size = header_size
-        self.command_byte_size = command_byte_size
-        self.max_connections = max_connections
+    def __init__(self, host, port, config):
+        self.host = host
+        self.port = port
+        self.config = config
 
         self.socket = skt.socket(skt.AF_INET, skt.SOCK_STREAM)    
         self.socket.bind((self.host, self.port))
-        self.socket.listen(max_connections)
+        self.socket.listen(self.config.stations_number)
 
         self.online = True
         self.clients = dict()
         self.listen()
 
     def listen(self):
-        try:
-            while self.online:
-                conn, addr = self.socket.accept()
-                self.clients[addr] = {
-                    'tcp' : ServerTCPConnection(conn, addr, self.stations_number, self.header_size, self.command_byte_size)
-                }
-                self.clients[addr]['tcp'].start()
-        except:
-            self.online = False
+        # try:
+        while self.online:
+            conn, addr = self.socket.accept()
+            ip, port = addr
+            self.clients[addr] = {
+                'tcp' : ServerTCPConnection(self, conn, addr),
+                'udp' : ServerUDPConnection(self, conn, addr)
+                'station' : -1,
+            }
+            self.clients[addr]['tcp'].run()
+        # except:
+        #     self.online = False
+    
+    def setUDPPort(self, ip, port, udpport):
+        self.clients[(ip, port)]['udpport'] = udpport
 
 
 
+# ---- TCP Connection Class
 
 class ServerTCPConnection(Thread):
-    def __init__(self, connection, address, stations_number, header_size, command_byte_size):
+
+
+
+    # ---- Thread Methods
+
+    def __init__(self, server, connection, addresse):
+        self.server = server
         self.connection = connection
-        self.address = address
-        self.stations_number = stations_number
-        self.header_size = header_size
-        self.command_byte_size = command_byte_size
-    
+        self.ip, self.port = address
+        
     def run(self):
-        pass
+        # Connected
+        self.online = True
+        self.handshake = False
+        show_notify(self.ip, self.port, 'TCP', 'is connected.')
+
+        # Get the First Command
+        size = self.connection.recv(self.config.header_size) 
+        if size:
+            size = size.decode('utf-8')
+            cmd, msg = self.__getCommand(size)
+            if cmd and msg:
+                if cmd == COMMAND_HELLO:
+                    try:
+                        udpport = int(msg.decode('utf-8'))
+                        self.server.setUDPPort(self.ip, self.port, udpport)
+                        
+                        # Send the Welcome response when UDPPort is Set (Handshake)
+                        self.sendWelcome()
+                        self.handshake = True
+                    except:
+                        self.online = False
+                else:
+                    self.sendInvalidCommand()
+            else:
+                self.online = False
+        else:
+            self.online = False
+            
+        # Waiting for set Station
+        while self.online:
+            size = self.connection.recv(self.config.header_size)
+            if size:
+                size = size.decode('utf-8')
+                cmd, msg = self.__getCommand(size)
+                if cmd and msg:
+                    if cmd == COMMAND_SET_STATION:
+                        try:
+                            station = int(msg.decode('utf-8'))
+                            self.server.setStation(self.ip, self.port, station)
+
+                            # 
+                        except:
+                            self.online = False
+                    else:
+                        self.sendInvalidCommand()
+       
+       # Disconnected
+        show_fail(self.ip, self.port, 'TCP', 'disconnected.')
+
+
+
+    # ---- Response Methods
 
     def sendWelcome(self):
-        message = convert_int_stringbyte(cmd.REPLY_HELLO, self.command_byte_size)
-        message += str(self.stations_number) 
+        message = convert_int_stringbyte(REPLY_HELLO, self.config.command_byte_size)
+        message += str(self.config.stations_number) 
         self.__send(message)
     
     def sendAnnounce(self, music):
-        message = convert_int_stringbyte(cmd.REPLY_ANNOUNCE, self.command_byte_size)
+        message = convert_int_stringbyte(REPLY_ANNOUNCE, self.config.command_byte_size)
         message += str(music)
         self.__send(message)
 
-    def sendInvalidCommand(self, stationNumber):
-        message = convert_int_stringbyte(cmd.REPLY_INVALID_COMMAND, self.command_byte_size)
-        message += str(stationNumber) 
+    def sendInvalidCommand(self):
+        message = convert_int_stringbyte(REPLY_INVALID_COMMAND, self.config.command_byte_size)
+        self.online = False
         self.__send(message)
+
+
+
+    # ---- Private Methods
 
     def __send(self, message):
         message_size = len(message)
-        header = convert_int_stringbyte(message_size, self.header_size)
+        header = convert_int_stringbyte(message_size, self.config.header_size)
         all_message = header + message
         self.connection.sendall(bytes(all_message, 'utf-8'))
+    
+    def __getCommand(self, size):
+        cmd, msg = None, None
+        if size.isdigit():
+            size = int(size)
+            data = self.connection.recv(size)
+            if data:
+                data = data.decode('utf-8')
+                cbs = self.config.command_byte_size
+                cmd, msg = int(data[:cbs]), data[cbs:]
+                show_command(self.ip, self.port, 'TCP', size, cmd, msg)
+        return cmd, msg
+
+
 
 class ServerUDPConnection:
-    pass
+    def __init__(self, server, connection, addresse):
+        self.server = server
+        self.connection = connection
+        self.ip, self.port = address
