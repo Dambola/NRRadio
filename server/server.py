@@ -26,17 +26,21 @@ class Server:
         while self.online:
             conn, addr = self.socket.accept()
             ip, port = addr
-            self.clients[addr] = {
+            self.clients[(ip, port)] = {
                 'tcp' : ServerTCPConnection(self, conn, addr),
-                'udp' : ServerUDPConnection(self, conn, addr)
+                'udp' : ServerUDPConnection(self, conn, addr),
                 'station' : -1,
+                'udpport' : -1,
             }
-            self.clients[addr]['tcp'].run()
+            self.clients[(ip, port)]['tcp'].run()
         # except:
         #     self.online = False
     
     def setUDPPort(self, ip, port, udpport):
         self.clients[(ip, port)]['udpport'] = udpport
+    
+    def setStation(self, ip, port, station):
+        self.clients[(ip, port)]['station'] = station
 
 
 
@@ -48,7 +52,7 @@ class ServerTCPConnection(Thread):
 
     # ---- Thread Methods
 
-    def __init__(self, server, connection, addresse):
+    def __init__(self, server, connection, address):
         self.server = server
         self.connection = connection
         self.ip, self.port = address
@@ -60,14 +64,14 @@ class ServerTCPConnection(Thread):
         show_notify(self.ip, self.port, 'TCP', 'is connected.')
 
         # Get the First Command
-        size = self.connection.recv(self.config.header_size) 
+        size = self.connection.recv(self.server.config.header_size) 
         if size:
             size = size.decode('utf-8')
             cmd, msg = self.__getCommand(size)
-            if cmd and msg:
+            if cmd is not None and msg is not None:
                 if cmd == COMMAND_HELLO:
                     try:
-                        udpport = int(msg.decode('utf-8'))
+                        udpport = int(msg)
                         self.server.setUDPPort(self.ip, self.port, udpport)
                         
                         # Send the Welcome response when UDPPort is Set (Handshake)
@@ -84,17 +88,15 @@ class ServerTCPConnection(Thread):
             
         # Waiting for set Station
         while self.online:
-            size = self.connection.recv(self.config.header_size)
+            size = self.connection.recv(self.server.config.header_size)
             if size:
                 size = size.decode('utf-8')
                 cmd, msg = self.__getCommand(size)
                 if cmd and msg:
                     if cmd == COMMAND_SET_STATION:
                         try:
-                            station = int(msg.decode('utf-8'))
+                            station = int(msg)
                             self.server.setStation(self.ip, self.port, station)
-
-                            # 
                         except:
                             self.online = False
                     else:
@@ -108,17 +110,17 @@ class ServerTCPConnection(Thread):
     # ---- Response Methods
 
     def sendWelcome(self):
-        message = convert_int_stringbyte(REPLY_HELLO, self.config.command_byte_size)
-        message += str(self.config.stations_number) 
+        message = convert_int_stringbyte(REPLY_WELCOME, self.server.config.command_byte_size)
+        message += str(self.server.config.stations_number) 
         self.__send(message)
     
     def sendAnnounce(self, music):
-        message = convert_int_stringbyte(REPLY_ANNOUNCE, self.config.command_byte_size)
+        message = convert_int_stringbyte(REPLY_ANNOUNCE, self.server.config.command_byte_size)
         message += str(music)
         self.__send(message)
 
     def sendInvalidCommand(self):
-        message = convert_int_stringbyte(REPLY_INVALID_COMMAND, self.config.command_byte_size)
+        message = convert_int_stringbyte(REPLY_INVALID_COMMAND, self.server.config.command_byte_size)
         self.online = False
         self.__send(message)
 
@@ -128,18 +130,18 @@ class ServerTCPConnection(Thread):
 
     def __send(self, message):
         message_size = len(message)
-        header = convert_int_stringbyte(message_size, self.config.header_size)
+        header = convert_int_stringbyte(message_size, self.server.config.header_size)
         all_message = header + message
         self.connection.sendall(bytes(all_message, 'utf-8'))
     
     def __getCommand(self, size):
         cmd, msg = None, None
-        if size.isdigit():
+        if size.strip().isdigit():
             size = int(size)
             data = self.connection.recv(size)
             if data:
                 data = data.decode('utf-8')
-                cbs = self.config.command_byte_size
+                cbs = self.server.config.command_byte_size
                 cmd, msg = int(data[:cbs]), data[cbs:]
                 show_command(self.ip, self.port, 'TCP', size, cmd, msg)
         return cmd, msg
@@ -147,7 +149,7 @@ class ServerTCPConnection(Thread):
 
 
 class ServerUDPConnection:
-    def __init__(self, server, connection, addresse):
+    def __init__(self, server, connection, address):
         self.server = server
         self.connection = connection
         self.ip, self.port = address
